@@ -410,8 +410,12 @@ class CameraCalibrationTool:
         self.review_image_label = tk.Label(right_frame, bg="black")
         self.review_image_label.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-        self.error_graph_label = tk.Label(right_frame, bg="white", height=8, relief=tk.SUNKEN)
-        self.error_graph_label.pack(fill=tk.X)
+        # Larger error graph
+        self.error_graph_label = tk.Label(right_frame, bg="white", relief=tk.SUNKEN, cursor="hand2")
+        self.error_graph_label.pack(fill=tk.BOTH, expand=False)
+
+        # Bind click event to the graph
+        self.error_graph_label.bind("<Button-1>", self.on_graph_click)
 
         # Always show the graph - either with corner counts or reprojection errors
         self.update_error_graph()
@@ -419,6 +423,40 @@ class CameraCalibrationTool:
         if len(self.captured_frames) > 0:
             self.image_listbox.selection_set(0)
             self.on_image_select(None)
+
+    def on_graph_click(self, event):
+        """Handle clicks on the bar graph to select corresponding image"""
+        if not self.captured_frames:
+            return
+
+        # Get the dimensions of the graph
+        n_images = len(self.captured_frames)
+        margin_left = 60
+        margin_right = 40
+
+        # Get label width
+        label_width = self.error_graph_label.winfo_width()
+
+        graph_width = label_width - margin_left - margin_right
+
+        # Calculate which bar was clicked
+        click_x = event.x
+
+        if click_x < margin_left or click_x > (label_width - margin_right):
+            return  # Clicked outside graph area
+
+        # Determine which image
+        relative_x = click_x - margin_left
+        image_idx = int((relative_x / graph_width) * n_images)
+
+        # Clamp to valid range
+        image_idx = max(0, min(image_idx, n_images - 1))
+
+        # Select the image in the listbox
+        self.image_listbox.selection_clear(0, tk.END)
+        self.image_listbox.selection_set(image_idx)
+        self.image_listbox.see(image_idx)
+        self.on_image_select(None)
 
     def delete_selected_image(self):
         """Delete the selected image from the calibration set"""
@@ -490,7 +528,7 @@ class CameraCalibrationTool:
 
             display_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w = display_frame.shape[:2]
-            max_h = 500
+            max_h = 400
             if h > max_h:
                 scale = max_h / h
                 display_frame = cv2.resize(display_frame, (int(w*scale), int(h*scale)))
@@ -604,16 +642,16 @@ class CameraCalibrationTool:
     def update_error_graph(self):
         """Create bar graph - shows corner counts before calibration, errors after"""
 
-        # Create bar graph
-        fig_width = 700
-        fig_height = 250
+        # Create larger bar graph
+        fig_width = 900
+        fig_height = 350
         img = np.ones((fig_height, fig_width, 3), dtype=np.uint8) * 255
 
         n_images = len(self.captured_frames)
         if n_images == 0:
             return
 
-        margin_left = 60
+        margin_left = 70
         margin_right = 40
         margin_top = 50
         margin_bottom = 50
@@ -621,23 +659,38 @@ class CameraCalibrationTool:
         graph_width = fig_width - margin_left - margin_right
         graph_height = fig_height - margin_top - margin_bottom
 
-        bar_width = max(8, (graph_width // n_images) - 8)
+        bar_width = max(10, (graph_width // n_images) - 10)
 
         # Decide what to show
         if self.reprojection_errors:
-            # Show reprojection errors
+            # Show reprojection errors with focused scale
             data = self.reprojection_errors
+            min_val = min(data)
             max_val = max(data)
             avg_val = np.mean(data)
-            title = "Reprojection Error per Image (pixels)"
+
+            # Use focused range: min-margin to max+margin
+            margin = 0.05  # 5% margin above and below
+            value_range = max_val - min_val
+            if value_range < 0.01:  # Very small range, use fixed margin
+                scale_min = max(0, min_val - 0.01)
+                scale_max = max_val + 0.01
+            else:
+                scale_min = max(0, min_val - value_range * margin)
+                scale_max = max_val + value_range * margin
+
+            title = "Reprojection Error per Image (pixels) - Click bar to view image"
             ylabel = "Error (px)"
             show_avg_line = True
         else:
-            # Show number of corners detected
+            # Show number of corners detected - start from 0
             data = [len(pts) for pts in self.image_points]
+            min_val = 0
             max_val = max(data) if data else 1
             avg_val = np.mean(data) if data else 0
-            title = "Detected Corners per Image"
+            scale_min = 0
+            scale_max = max_val * 1.1
+            title = "Detected Corners per Image - Click bar to view image"
             ylabel = "Corners"
             show_avg_line = False
 
@@ -647,7 +700,10 @@ class CameraCalibrationTool:
 
         # Draw bars
         for i, val in enumerate(data):
-            bar_height = int((val / (max_val * 1.1)) * graph_height)
+            # Calculate bar height using the focused scale
+            bar_height = int(((val - scale_min) / (scale_max - scale_min)) * graph_height)
+            bar_height = max(2, bar_height)  # Minimum 2px height
+
             x_center = margin_left + (i + 0.5) * (graph_width / n_images)
             x1 = int(x_center - bar_width // 2)
             x2 = int(x_center + bar_width // 2)
@@ -655,50 +711,50 @@ class CameraCalibrationTool:
             y2 = fig_height - margin_bottom
 
             if self.reprojection_errors:
-                # Color bars based on error (green to red gradient)
-                error_ratio = val / max_val
+                # Color bars based on error relative to range (green to red gradient)
+                error_ratio = (val - min_val) / (max_val - min_val) if max_val > min_val else 0
                 color = (int(50 * (1 - error_ratio)), int(150 + 105 * (1 - error_ratio)), int(255 * (1 - error_ratio)))
             else:
                 # Blue bars for corner counts
                 color = (66, 133, 244)
 
             cv2.rectangle(img, (x1, y1), (x2, y2), color, -1)
-            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 0), 1)
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 0), 2)
 
             # Image number below bar
             text = str(i+1)
-            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.35, 1)[0]
+            text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
             text_x = int(x_center - text_size[0] // 2)
-            cv2.putText(img, text, (text_x, fig_height - margin_bottom + 20), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+            cv2.putText(img, text, (text_x, fig_height - margin_bottom + 25), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
         # Draw average line (only for reprojection errors)
         if show_avg_line:
-            avg_y = fig_height - margin_bottom - int((avg_val / (max_val * 1.1)) * graph_height)
-            cv2.line(img, (margin_left, avg_y), (fig_width - margin_right, avg_y), (244, 67, 54), 2)
-            cv2.putText(img, "Avg", (margin_left - 35, avg_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (244, 67, 54), 1)
+            avg_y = fig_height - margin_bottom - int(((avg_val - scale_min) / (scale_max - scale_min)) * graph_height)
+            cv2.line(img, (margin_left, avg_y), (fig_width - margin_right, avg_y), (244, 67, 54), 3)
+            cv2.putText(img, "Avg", (margin_left - 45, avg_y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (244, 67, 54), 2)
 
-        # Y-axis labels
-        for i in range(5):
-            y_val = (max_val * 1.1) * i / 4
-            y_pos = fig_height - margin_bottom - int((y_val / (max_val * 1.1)) * graph_height)
-            cv2.line(img, (margin_left - 5, y_pos), (margin_left, y_pos), (0, 0, 0), 1)
+        # Y-axis labels with focused scale
+        for i in range(6):
+            y_val = scale_min + (scale_max - scale_min) * i / 5
+            y_pos = fig_height - margin_bottom - int(((y_val - scale_min) / (scale_max - scale_min)) * graph_height)
+            cv2.line(img, (margin_left - 7, y_pos), (margin_left, y_pos), (0, 0, 0), 2)
             if self.reprojection_errors:
-                cv2.putText(img, f"{y_val:.2f}", (5, y_pos + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+                cv2.putText(img, f"{y_val:.3f}", (5, y_pos + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
             else:
-                cv2.putText(img, f"{int(y_val)}", (10, y_pos + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+                cv2.putText(img, f"{int(y_val)}", (15, y_pos + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
 
         # Title
-        title_size = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        title_size = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
         title_x = (fig_width - title_size[0]) // 2
-        cv2.putText(img, title, (title_x, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        cv2.putText(img, title, (title_x, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2)
 
         # Stats
         if self.reprojection_errors:
-            stats_text = f"Avg: {avg_val:.4f} | Max: {max(data):.4f} | Min: {min(data):.4f}"
+            stats_text = f"Range: {min_val:.4f} - {max_val:.4f} px | Avg: {avg_val:.4f} px"
         else:
             stats_text = f"Avg: {avg_val:.1f} | Max: {max(data)} | Min: {min(data)} corners"
-        cv2.putText(img, stats_text, (margin_left + 10, 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+        cv2.putText(img, stats_text, (margin_left + 10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
 
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(img_rgb)
@@ -819,7 +875,6 @@ CAMERA MATRIX (K)
                 json.dump(self.calibration_result, f, indent=4)
             messagebox.showinfo("Success", f"Calibration saved to:\n{filename}")
 
-    
     def save_sample_code(self):
         """Generate and save sample Python code using the calibration data"""
         if not self.calibration_result:
@@ -1009,6 +1064,7 @@ if __name__ == "__main__":
     # cap.release()
     # cv2.destroyAllWindows()
 """
+
         filename = filedialog.asksaveasfilename(
             defaultextension=".py",
             filetypes=[("Python files", "*.py"), ("All files", "*.*")],
