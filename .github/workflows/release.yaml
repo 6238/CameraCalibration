@@ -1,0 +1,36 @@
+name: Build Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install uv
+      run: |
+        powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+        echo "$env:USERPROFILE\\.local\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+    
+    - name: Install dependencies
+      run: |
+        uv venv
+        uv pip install opencv-python pillow numpy
+        uv pip install pyinstaller
+    
+    - name: Build executable
+      run: |
+        .venv\\Scripts\\activate
+        pyinstaller main.spec
+    
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: dist/CameraCalibrationTool.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
